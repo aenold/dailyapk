@@ -1,0 +1,68 @@
+name: Mirror Shopee PH from Huawei AppGallery
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'   # every 6 hours, offset 17min to avoid traffic spike
+  workflow_dispatch:           # manual trigger from the Actions tab
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed to create releases
+    steps:
+      - name: Download latest Shopee PH from Huawei
+        run: |
+          curl -L --fail -o shopee.apk \
+            "https://appgallery.cloud.huawei.com/appdl/C100706415"
+          ls -lh shopee.apk
+
+      - name: Read versionName from APK
+        id: ver
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt
+          VER=$(aapt dump badging shopee.apk | grep -oP "versionName='\K[^']+")
+          CODE=$(aapt dump badging shopee.apk | grep -oP "versionCode='\K[^']+")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Detected Shopee version: $VER (code $CODE)"
+
+      - name: Check if this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="shopee-${{ steps.ver.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists, skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish new release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="shopee-${{ steps.ver.outputs.version }}"
+          mv shopee.apk "shopee-${{ steps.ver.outputs.version }}.apk"
+          gh release create "$TAG" \
+            --title "Shopee PH ${{ steps.ver.outputs.version }}" \
+            --notes "Auto-mirrored from Huawei AppGallery (C100706415). versionCode=${{ steps.ver.outputs.code }}. Direct CDN host varies per request - serving from GitHub avoids the Huawei rate-limit and makes device-side curl install fast." \
+            "shopee-${{ steps.ver.outputs.version }}.apk"
+
+      - name: Move/refresh "latest" tag pointer
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Re-create a stable "shopee-latest" release that points at the new
+          # APK so pipelines can hardcode one URL forever.
+          mv shopee-${{ steps.ver.outputs.version }}.apk shopee-latest.apk
+          gh release delete shopee-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create shopee-latest \
+            --title "Shopee PH (latest auto-mirror)" \
+            --notes "Always points at the newest Shopee PH build mirrored from Huawei AppGallery. Currently ${{ steps.ver.outputs.version }}." \
+            shopee-latest.apk
