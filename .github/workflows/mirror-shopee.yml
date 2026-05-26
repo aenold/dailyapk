@@ -1,20 +1,37 @@
-name: Mirror Shopee PH from Huawei AppGallery
+name: Mirror Shopee PH from APKPure (via apkeep)
 
 on:
   schedule:
-    - cron: '17 */6 * * *'   # every 6 hours, offset 17min to avoid traffic spike
-  workflow_dispatch:           # manual trigger from the Actions tab
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # needed to create releases
+      contents: write
     steps:
-      - name: Download latest Shopee PH from Huawei
+      - name: Install apkeep
         run: |
-          curl -L --fail -o shopee.apk \
-            "https://appgallery.cloud.huawei.com/appdl/C100706415"
+          curl -L -o apkeep \
+            https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu
+          chmod +x apkeep
+          sudo mv apkeep /usr/local/bin/
+
+      - name: Download Shopee PH from APKPure
+        run: |
+          mkdir -p out
+          apkeep -a com.shopee.ph -d apk-pure out/
+          ls -lh out/
+          FILE=$(ls out/com.shopee.ph.* | head -1)
+          echo "downloaded=$FILE"
+          if [[ "$FILE" == *.xapk ]]; then
+            unzip -o "$FILE" -d out/xapk
+            # XAPKs put the main APK as base.apk or <pkg>.apk inside
+            cp "$(ls out/xapk/base.apk out/xapk/com.shopee.ph.apk 2>/dev/null | head -1)" shopee.apk
+          else
+            cp "$FILE" shopee.apk
+          fi
           ls -lh shopee.apk
 
       - name: Read versionName from APK
@@ -28,7 +45,7 @@ jobs:
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "Detected Shopee version: $VER (code $CODE)"
 
-      - name: Check if this version is already released
+      - name: Check if version already released
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,33 +53,30 @@ jobs:
           TAG="shopee-${{ steps.ver.outputs.version }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists, skipping."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish new release
+      - name: Publish versioned release
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="shopee-${{ steps.ver.outputs.version }}"
-          mv shopee.apk "shopee-${{ steps.ver.outputs.version }}.apk"
-          gh release create "$TAG" \
+          cp shopee.apk "shopee-${{ steps.ver.outputs.version }}.apk"
+          gh release create "shopee-${{ steps.ver.outputs.version }}" \
             --title "Shopee PH ${{ steps.ver.outputs.version }}" \
-            --notes "Auto-mirrored from Huawei AppGallery (C100706415). versionCode=${{ steps.ver.outputs.code }}. Direct CDN host varies per request - serving from GitHub avoids the Huawei rate-limit and makes device-side curl install fast." \
+            --notes "Auto-mirrored from APKPure via apkeep. versionCode=${{ steps.ver.outputs.code }}." \
             "shopee-${{ steps.ver.outputs.version }}.apk"
 
-      - name: Move/refresh "latest" tag pointer
+      - name: Refresh stable "shopee-latest" pointer
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Re-create a stable "shopee-latest" release that points at the new
-          # APK so pipelines can hardcode one URL forever.
-          mv shopee-${{ steps.ver.outputs.version }}.apk shopee-latest.apk
+          cp shopee.apk shopee-latest.apk
           gh release delete shopee-latest --yes --cleanup-tag 2>/dev/null || true
+          sleep 2
           gh release create shopee-latest \
             --title "Shopee PH (latest auto-mirror)" \
-            --notes "Always points at the newest Shopee PH build mirrored from Huawei AppGallery. Currently ${{ steps.ver.outputs.version }}." \
+            --notes "Always points at the newest Shopee PH build. Currently ${{ steps.ver.outputs.version }}." \
             shopee-latest.apk
